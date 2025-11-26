@@ -45,6 +45,7 @@ const KiteTurbineSimulation: React.FC = () => {
   const [envWindSpeed, setEnvWindSpeed] = useState<number>(12); // Environmental Wind Speed (m/s)
   const [torque, setTorque] = useState<number>(50); // Generator Torque (0-100%)
   const [isAutoPilot, setIsAutoPilot] = useState<boolean>(false);
+  const [scenario, setScenario] = useState<string>('default'); // default, foggy, night, christmas
   
   // Read-only Physics State (Throttled for UI)
   const [uiRpm, setUiRpm] = useState<number>(0);
@@ -166,10 +167,6 @@ const KiteTurbineSimulation: React.FC = () => {
       const currentBaseY = 20 + (MAX_BASE_OFFSET_Y - 20) * depl;
       const distScale = 0.05 + (0.95) * depl; // Compress length when grounded
       
-      // Camera override REMOVED to respect user controls
-      // const targetCamY = 2500 * depl + 200;
-      // ...
-
       // --- 3D Transforms with Dynamic Tilt ---
       const transformPointRotation = (p: Point3D): Point3D => {
           const c = Math.cos(currentTilt);
@@ -299,24 +296,64 @@ const KiteTurbineSimulation: React.FC = () => {
 
       ctx.clearRect(0, 0, width, height);
 
+      // --- SCENARIO PALETTES ---
+      let skyColorTop = '#0f172a';
+      let skyColorBottom = '#e0f2fe';
+      let skyStop = 0.6;
+      let groundColor = '#3f6212';
+      let fogColor = 'rgba(224, 242, 254, 0.4)';
+      let fogHeight = 300;
+      let structureStroke = '#334155';
+      let bladeColor = '#1e293b';
+
+      if (scenario === 'foggy') {
+          skyColorTop = '#94a3b8'; // Slate 400
+          skyColorBottom = '#cbd5e1'; // Slate 300
+          skyStop = 0.3;
+          groundColor = '#475569'; // Slate 600
+          fogColor = 'rgba(203, 213, 225, 0.9)'; // Dense fog
+          fogHeight = 800; // High fog
+          structureStroke = '#1e293b';
+      } else if (scenario === 'night' || scenario === 'christmas') {
+          skyColorTop = '#020617'; // Slate 950
+          skyColorBottom = '#172554'; // Blue 950
+          skyStop = 0.8;
+          groundColor = '#0f172a'; // Dark ground
+          fogColor = 'rgba(15, 23, 42, 0.5)'; // Dark fog
+          structureStroke = '#475569';
+          bladeColor = '#0f172a';
+      }
+
       // Sky
       const skyGrad = ctx.createLinearGradient(0, 0, 0, height);
-      skyGrad.addColorStop(0, '#0f172a'); 
-      skyGrad.addColorStop(0.6, '#38bdf8'); 
-      skyGrad.addColorStop(1, '#e0f2fe'); 
+      skyGrad.addColorStop(0, skyColorTop); 
+      skyGrad.addColorStop(skyStop, scenario === 'foggy' ? skyColorTop : '#38bdf8'); // Midpoint variation
+      skyGrad.addColorStop(1, skyColorBottom); 
       ctx.fillStyle = skyGrad;
       ctx.fillRect(0, 0, width, height);
+
+      // Stars for Night/Christmas
+      if (scenario === 'night' || scenario === 'christmas') {
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+          // Deterministic pseudo-random stars based on screen coordinates
+          for(let i=0; i<100; i++) {
+              const x = (Math.sin(i * 123.45) * 0.5 + 0.5) * width;
+              const y = (Math.cos(i * 678.90) * 0.5 + 0.5) * height / 1.5;
+              const size = (i % 3 === 0) ? 1.5 : 1;
+              ctx.beginPath(); ctx.arc(x, y, size, 0, Math.PI*2); ctx.fill();
+          }
+      }
 
       const horizonY = height / 2 - fov * Math.tan(cameraState.current.phi);
 
       // Ground
       if (horizonY < height) {
-          ctx.fillStyle = '#3f6212'; 
+          ctx.fillStyle = groundColor; 
           ctx.fillRect(0, horizonY, width, height - horizonY);
-          const fogHeight = 300;
+          
           if (height - horizonY > 0) {
              const groundFog = ctx.createLinearGradient(0, horizonY, 0, Math.min(height, horizonY + fogHeight));
-             groundFog.addColorStop(0, 'rgba(224, 242, 254, 0.4)');
+             groundFog.addColorStop(0, fogColor);
              groundFog.addColorStop(1, 'rgba(63, 98, 18, 0)');
              ctx.fillStyle = groundFog;
              ctx.fillRect(0, horizonY, width, fogHeight);
@@ -441,10 +478,30 @@ const KiteTurbineSimulation: React.FC = () => {
       const gsYBase = -400; 
       const gsYTop = -20;
       
-      drawCylinder({x:0, y: gsYBase, z: 0}, {x:0, y: gsYTop, z:0}, 30, 'rgba(100,116,139, 0.5)'); 
-      drawDisk({x:0, y: gsYBase, z:0}, 200, true, 'rgba(100,116,139, 0.5)');
+      const gsColor = (scenario === 'night' || scenario === 'christmas') ? 'rgba(70,80,100, 0.5)' : 'rgba(100,116,139, 0.5)';
+      drawCylinder({x:0, y: gsYBase, z: 0}, {x:0, y: gsYTop, z:0}, 30, gsColor); 
+      drawDisk({x:0, y: gsYBase, z:0}, 200, true, gsColor);
       drawDisk({x:0, y: 5, z:0}, 280, true, '#ef4444');
       drawCylinder({x:0, y: 5, z: 0}, {x:0, y: currentBaseY, z:0}, 60, '#64748b');
+
+      // Night/Christmas Ground Station Light
+      if (scenario === 'night' || scenario === 'christmas') {
+          const lightPos = { x: 0, y: 10, z: 0 };
+          const lightS = worldToScreen(lightPos, width, height);
+          if (lightS) {
+              drawQueue.push({
+                  z: lightS.z - 50, // slightly in front
+                  draw: () => {
+                       const glowRadius = 50 + Math.sin(Date.now() / 200) * 5;
+                       const grd = ctx.createRadialGradient(lightS.x, lightS.y, 0, lightS.x, lightS.y, glowRadius);
+                       grd.addColorStop(0, 'rgba(255, 200, 50, 0.8)');
+                       grd.addColorStop(1, 'rgba(255, 200, 50, 0)');
+                       ctx.fillStyle = grd;
+                       ctx.beginPath(); ctx.arc(lightS.x, lightS.y, glowRadius, 0, Math.PI*2); ctx.fill();
+                  }
+              });
+          }
+      }
 
       // Motor & Cable
       // Fixed Ground parts:
@@ -594,6 +651,55 @@ const KiteTurbineSimulation: React.FC = () => {
                       ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 0.5;
                       ribs.forEach((r, idx) => { if (idx % 1 === 0) { ctx.beginPath(); ctx.moveTo(r.bottom.x, r.bottom.y); ctx.lineTo(bridlePointS.x, bridlePointS.y); ctx.stroke(); } });
                   }
+
+                  // Beacon Light on Kite (Foggy/Night/Christmas)
+                  if (scenario !== 'default') {
+                      const isStrobe = Math.floor(Date.now() / 500) % 2 === 0;
+                      if (isStrobe || scenario === 'night' || scenario === 'christmas') {
+                          // Center of kite
+                          const cx = ribs[Math.floor(ribs.length/2)].bottom.x;
+                          const cy = ribs[Math.floor(ribs.length/2)].bottom.y;
+                          
+                          if (scenario === 'foggy') {
+                              // White Strobe
+                              if(isStrobe) {
+                                  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, 30);
+                                  g.addColorStop(0, 'rgba(255,255,255,1)');
+                                  g.addColorStop(1, 'rgba(255,255,255,0)');
+                                  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, 30, 0, Math.PI*2); ctx.fill();
+                              }
+                          } else {
+                              // Night navigation light (Red steady) + White Strobe
+                              // Red
+                              ctx.shadowBlur = 10; ctx.shadowColor = 'red'; ctx.fillStyle = 'red';
+                              ctx.beginPath(); ctx.arc(cx - 10, cy, 4, 0, Math.PI*2); ctx.fill();
+                              ctx.shadowBlur = 0;
+                              
+                              if (isStrobe) {
+                                  ctx.shadowBlur = 15; ctx.shadowColor = 'white'; ctx.fillStyle = 'white';
+                                  ctx.beginPath(); ctx.arc(cx + 10, cy, 4, 0, Math.PI*2); ctx.fill();
+                                  ctx.shadowBlur = 0;
+                              }
+                          }
+                      }
+                  }
+                  
+                  // Christmas Lights on Kite Leading Edge
+                  if (scenario === 'christmas') {
+                      ribs.forEach((r, idx) => {
+                          const cx = r.top.x;
+                          const cy = r.top.y;
+                          const colors = ['#ef4444', '#22c55e', '#eab308', '#3b82f6'];
+                          const color = colors[idx % 4];
+                          const blink = Math.sin(Date.now()/200 + idx) > 0;
+                          if (blink) {
+                              ctx.fillStyle = color;
+                              ctx.shadowColor = color; ctx.shadowBlur = 5;
+                              ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2); ctx.fill();
+                              ctx.shadowBlur = 0;
+                          }
+                      });
+                  }
               }
           });
       }
@@ -635,15 +741,30 @@ const KiteTurbineSimulation: React.FC = () => {
                       if (started) ctx.closePath();
 
                       if (def.type === 'rotor-main') {
-                          ctx.lineWidth = 4; ctx.strokeStyle = '#1e293b'; 
+                          ctx.lineWidth = 4; ctx.strokeStyle = bladeColor; 
                       } else if (def.type === 'bearing') {
-                          ctx.lineWidth = 3; ctx.strokeStyle = '#475569';
+                          ctx.lineWidth = 3; ctx.strokeStyle = structureStroke;
                       } else if (def.type === 'pto') {
                           ctx.lineWidth = 0; ctx.fillStyle = '#2563eb'; ctx.fill(); ctx.strokeStyle = '#1e3a8a'; ctx.lineWidth = 2;
                       } else {
-                          ctx.lineWidth = 1; ctx.strokeStyle = '#334155';
+                          ctx.lineWidth = 1; ctx.strokeStyle = structureStroke;
                       }
                       ctx.stroke();
+
+                      // Christmas Lights on Rings
+                      if (scenario === 'christmas' && def.type !== 'bearing') {
+                           currentPts.forEach((pt, idx) => {
+                               if (pt) {
+                                   const colors = ['#ef4444', '#22c55e', '#eab308', '#3b82f6'];
+                                   const color = colors[(lIdx + idx) % 4];
+                                   const blink = Math.sin(Date.now()/300 + idx + lIdx) > 0;
+                                   if (blink) {
+                                       ctx.fillStyle = color;
+                                       ctx.beginPath(); ctx.arc(pt.p2.x, pt.p2.y, 2.5, 0, Math.PI*2); ctx.fill();
+                                   }
+                               }
+                           });
+                      }
 
                       if (def.type === 'pto') {
                           ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1;
@@ -658,11 +779,27 @@ const KiteTurbineSimulation: React.FC = () => {
                              const outerTipS = worldToScreen(getTurbineWorldPos({ x: Math.cos(angle) * (def.r + bladeLengthOut), y: def.y, z: Math.sin(angle) * (def.r + bladeLengthOut) }), width, height);
                              if (innerTipS && outerTipS) {
                                  ctx.beginPath(); ctx.moveTo(innerTipS.x, innerTipS.y); ctx.lineTo(outerTipS.x, outerTipS.y);
-                                 ctx.strokeStyle = 'white'; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.stroke();
+                                 ctx.strokeStyle = (scenario === 'night' || scenario === 'christmas') ? '#cbd5e1' : 'white'; 
+                                 ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.stroke();
                                  const dx = outerTipS.x - innerTipS.x; const dy = outerTipS.y - innerTipS.y;
                                  const redStart = { x: outerTipS.x - dx * 0.2, y: outerTipS.y - dy * 0.2 };
                                  ctx.beginPath(); ctx.moveTo(redStart.x, redStart.y); ctx.lineTo(outerTipS.x, outerTipS.y);
                                  ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 6; ctx.stroke();
+
+                                 if (scenario === 'christmas') {
+                                     // Lights along blade
+                                     for(let k=1; k<5; k++) {
+                                         const t = k/5;
+                                         const lx = innerTipS.x + dx * t;
+                                         const ly = innerTipS.y + dy * t;
+                                         const colors = ['#ef4444', '#22c55e', '#eab308', '#3b82f6'];
+                                         const color = colors[(Math.floor(t*10)) % 4];
+                                         const blink = Math.sin(Date.now()/100 + t*10) > 0;
+                                         if(blink) {
+                                            ctx.fillStyle = color; ctx.beginPath(); ctx.arc(lx, ly, 2, 0, Math.PI*2); ctx.fill();
+                                         }
+                                     }
+                                 }
                              }
                           });
                       }
@@ -677,7 +814,8 @@ const KiteTurbineSimulation: React.FC = () => {
                       drawQueue.push({
                           z: (centerS.z + nextCenterS.z) / 2,
                           draw: () => {
-                              ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(50, 50, 50, 0.8)';
+                              ctx.lineWidth = 2; 
+                              ctx.strokeStyle = (scenario === 'night' || scenario === 'christmas') ? 'rgba(80, 80, 100, 0.5)' : 'rgba(50, 50, 50, 0.8)';
                               for (let i = 0; i < bladeCount; i++) {
                                   const pStart = currentPts[i];
                                   const pEnd = nextLayerPts[i];
@@ -753,7 +891,7 @@ const KiteTurbineSimulation: React.FC = () => {
       cancelAnimationFrame(frameId.current);
       window.removeEventListener('resize', handleResize);
     };
-  }, [torque, bladeCount, bladeLengthOut, bladeLengthIn, envWindSpeed, isAutoPilot, uiStatus, uiTsr, uiRpm]); 
+  }, [torque, bladeCount, bladeLengthOut, bladeLengthIn, envWindSpeed, isAutoPilot, uiStatus, uiTsr, uiRpm, scenario]); 
 
 
   // --- Controls ---
@@ -880,6 +1018,21 @@ const KiteTurbineSimulation: React.FC = () => {
                 )}
             </div>
         )}
+
+        {/* Scenario Mode */}
+        <div className="flex flex-col gap-1">
+            <label className="text-slate-300 text-xs">Scenario Mode</label>
+            <select 
+                value={scenario}
+                onChange={(e) => setScenario(e.target.value)}
+                className="w-full bg-slate-700 text-slate-200 text-xs rounded p-1 border border-slate-600 focus:border-sky-500 outline-none"
+            >
+                <option value="default">Default Day</option>
+                <option value="foggy">Foggy Weather</option>
+                <option value="night">Night Operation</option>
+                <option value="christmas">Christmas Special</option>
+            </select>
+        </div>
 
         {/* Wind */}
         <div className="flex flex-col gap-1">
