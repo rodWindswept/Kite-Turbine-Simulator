@@ -27,11 +27,21 @@ interface LabelData {
     statusColor?: string;
 }
 
+interface WindParticle {
+    id: number;
+    x: number;
+    y: number;
+    z: number;
+    baseY: number;
+    speed: number;
+    phase: number;
+}
+
 // Configuration for the structure
 const MAX_BASE_OFFSET_Y = 280; 
 const ROTOR_RADIUS_SCALE = 1050; // Visual radius units
 // Physics constants
-const TSR_MAX_BASE = 6.0;
+const TSR_MAX_BASE = 8.0; // Increased to allow high speed depowering
 
 // Orientation Physics
 const ELEVATION_ANGLE_DEG = 30;
@@ -45,7 +55,7 @@ const KiteTurbineSimulation: React.FC = () => {
   const [envWindSpeed, setEnvWindSpeed] = useState<number>(12); // Environmental Wind Speed (m/s)
   const [torque, setTorque] = useState<number>(50); // Generator Torque (0-100%)
   const [isAutoPilot, setIsAutoPilot] = useState<boolean>(false);
-  const [scenario, setScenario] = useState<string>('default'); // default, foggy, night, christmas
+  const [scenario, setScenario] = useState<string>('default'); // default, foggy, night, christmas, wind_field
   
   // Read-only Physics State (Throttled for UI)
   const [uiRpm, setUiRpm] = useState<number>(0);
@@ -67,6 +77,7 @@ const KiteTurbineSimulation: React.FC = () => {
   
   // Animation State
   const deploymentRef = useRef<number>(1.0); // 0.0 (Grounded) to 1.0 (Flying)
+  const windParticlesRef = useRef<WindParticle[]>([]);
 
   // Interactive Parameters
   const [bladeCount, setBladeCount] = useState<number>(6);
@@ -206,11 +217,9 @@ const KiteTurbineSimulation: React.FC = () => {
         const zFinal = z3 - cam.radius;
         if (zFinal >= 0) return null; 
         
-        const scale = fov / (fov - zFinal);
-        
         return {
-          x: width / 2 + x2 * scale,
-          y: height / 2 - y3 * scale, 
+          x: width / 2 + x2 * (fov / (fov - zFinal)),
+          y: height / 2 - y3 * (fov / (fov - zFinal)), 
           z: zFinal 
         };
       };
@@ -228,18 +237,39 @@ const KiteTurbineSimulation: React.FC = () => {
       let currentTorque = torque;
 
       if (isAutoPilot) {
-          const error = physicsState.current.tsr - currentOptimalTSR;
-          const correction = error * 2.0; 
-          let newTorque = currentTorque + correction;
-          const MAX_SAFE_TORQUE = 80;
-          newTorque = Math.max(0, Math.min(MAX_SAFE_TORQUE, newTorque));
+          // Default: Track Optimal TSR using P-controller
+          const tsrError = physicsState.current.tsr - currentOptimalTSR;
+          const torqueCorrection = tsrError * 2.0; 
+          let desiredTorque = currentTorque + torqueCorrection;
+
+          // Strategy: High Speed Low Torque (Depowering)
+          // Prioritize TRPT safety and Generator Limits over optimal efficiency
+          const POWER_LIMIT_KW = 28; // Start depowering before 30kW limit
+          const TORQUE_LIMIT_PCT = 75; // Avoid high compression forces
+
+          // If power is high, aggressively reduce torque to induce overspeed 
+          // (moving to right side of Cp curve where efficiency drops)
+          if (physicsState.current.kw > POWER_LIMIT_KW) {
+             const powerExcess = physicsState.current.kw - POWER_LIMIT_KW;
+             // Reduce torque proportional to excess power to shed load
+             desiredTorque -= (powerExcess * 10.0); 
+          }
+
+          // Hard clamp on torque for structural safety (TRPT compression risk)
+          if (desiredTorque > TORQUE_LIMIT_PCT) {
+              desiredTorque = TORQUE_LIMIT_PCT;
+          }
+
+          // Clamp to valid range
+          desiredTorque = Math.max(0, Math.min(100, desiredTorque));
           
-          if (Math.abs(newTorque - torque) > 0.5) {
+          // Apply with smoothing
+          if (Math.abs(desiredTorque - torque) > 0.5) {
               setTorque(prev => {
-                  const step = (newTorque - prev) * 0.1;
+                  const step = (desiredTorque - prev) * 0.1;
                   return prev + step;
               });
-              currentTorque = newTorque; 
+              currentTorque = desiredTorque; 
           }
       }
 
@@ -257,7 +287,7 @@ const KiteTurbineSimulation: React.FC = () => {
             if (envWindSpeed <= 18) {
                 physicsState.current.isRunaway = false;
             } else {
-                targetTSR = 6.2; 
+                targetTSR = 8.0; 
             }
         } else {
             if (brakeRatio >= 1.0) {
@@ -266,7 +296,9 @@ const KiteTurbineSimulation: React.FC = () => {
             } else {
                 targetTSR = currentOptimalTSR + (1.0 - brakeRatio) * (currentMaxTSR - currentOptimalTSR);
                 const isPowerSaturated = physicsState.current.kw >= 30;
-                if (targetTSR > 5.8 && isPowerSaturated) {
+                // Only consider it runaway if we are trying to brake (high torque) but failing.
+                // If torque is low, we are likely intentionally overspeeding.
+                if (targetTSR > 7.0 && isPowerSaturated && currentTorque > 85) {
                     physicsState.current.isRunaway = true;
                 }
             }
@@ -322,12 +354,17 @@ const KiteTurbineSimulation: React.FC = () => {
           fogColor = 'rgba(15, 23, 42, 0.5)'; // Dark fog
           structureStroke = '#475569';
           bladeColor = '#0f172a';
+      } else if (scenario === 'wind_field') {
+          skyColorTop = '#1e293b'; // Slate 800
+          skyColorBottom = '#334155'; // Slate 700
+          groundColor = '#0f172a';
+          fogColor = 'rgba(30, 41, 59, 0.5)';
       }
 
       // Sky
       const skyGrad = ctx.createLinearGradient(0, 0, 0, height);
       skyGrad.addColorStop(0, skyColorTop); 
-      skyGrad.addColorStop(skyStop, scenario === 'foggy' ? skyColorTop : '#38bdf8'); // Midpoint variation
+      skyGrad.addColorStop(skyStop, scenario === 'foggy' ? skyColorTop : (scenario === 'wind_field' ? '#475569' : '#38bdf8')); // Midpoint variation
       skyGrad.addColorStop(1, skyColorBottom); 
       ctx.fillStyle = skyGrad;
       ctx.fillRect(0, 0, width, height);
@@ -472,6 +509,86 @@ const KiteTurbineSimulation: React.FC = () => {
       }
       ctx.stroke();
       ctx.restore();
+
+      // --- Wind Particle System ---
+      if (scenario === 'wind_field') {
+          const MAX_PARTICLES = 150;
+          const particleSpeed = envWindSpeed * 10; // Visual speed multiplier
+          
+          // Spawn new particles
+          if (windParticlesRef.current.length < MAX_PARTICLES) {
+             const needed = MAX_PARTICLES - windParticlesRef.current.length;
+             for(let i=0; i<Math.min(5, needed); i++) {
+                 windParticlesRef.current.push({
+                     id: Math.random(),
+                     x: (Math.random() - 0.5) * 6000,
+                     y: Math.random() * 8000,
+                     baseY: Math.random() * 8000,
+                     z: -2000 - Math.random() * 2000, // Start behind
+                     speed: particleSpeed * (0.8 + Math.random() * 0.4),
+                     phase: Math.random() * Math.PI * 2
+                 });
+             }
+          }
+
+          // Turbine Center Calculation for Deflection
+          // Rotor center is roughly at 5000 units up the tether
+          const rotorCenterLocal = { x: 0, y: 5000 * distScale, z: 0 };
+          const rotorCenterWorld = getTurbineWorldPos(rotorCenterLocal);
+          const rotorRadiusWorld = (ROTOR_RADIUS_SCALE + bladeLengthOut);
+
+          // Update & Draw Particles
+          windParticlesRef.current.forEach(p => {
+              p.z += p.speed * dt * 10;
+              
+              // Interaction logic
+              // Simple check: distance to rotor center axis
+              const dx = p.x - rotorCenterWorld.x;
+              const dy = p.y - rotorCenterWorld.y;
+              const dz = p.z - rotorCenterWorld.z;
+              const distToRotor = Math.sqrt(dx*dx + dy*dy + dz*dz);
+              
+              // Deflection field
+              if (distToRotor < rotorRadiusWorld * 1.5 && p.z < rotorCenterWorld.z + 500) {
+                  // Push away from center
+                  const pushFactor = (rotorRadiusWorld * 1.5 - distToRotor) / (rotorRadiusWorld * 1.5);
+                  p.x += (dx / distToRotor) * pushFactor * 100 * dt;
+                  p.y += (dy / distToRotor) * pushFactor * 100 * dt;
+                  
+                  // Swirl if close to center
+                  if (distToRotor < rotorRadiusWorld * 0.8) {
+                      p.x += Math.cos(p.phase + Date.now()*0.01) * 50 * dt;
+                  }
+              }
+
+              // Reset if too far
+              if (p.z > 8000) {
+                  p.z = -4000;
+                  p.x = (Math.random() - 0.5) * 6000;
+                  p.y = Math.random() * 8000;
+              }
+
+              const pScreenStart = worldToScreen({x: p.x, y: p.y, z: p.z}, width, height);
+              const pScreenEnd = worldToScreen({x: p.x, y: p.y, z: p.z - 300}, width, height); // Trail behind
+              
+              if (pScreenStart && pScreenEnd) {
+                  drawQueue.push({
+                      z: pScreenStart.z,
+                      draw: () => {
+                          ctx.beginPath();
+                          ctx.moveTo(pScreenStart.x, pScreenStart.y);
+                          ctx.lineTo(pScreenEnd.x, pScreenEnd.y);
+                          const alpha = Math.min(1, Math.max(0, (8000 - p.z) / 2000));
+                          ctx.strokeStyle = `rgba(200, 240, 255, ${alpha * 0.4})`;
+                          ctx.lineWidth = 1;
+                          ctx.stroke();
+                      }
+                  });
+              }
+          });
+      } else {
+          windParticlesRef.current = []; // Clear when not in mode
+      }
 
 
       // Ground Station
@@ -653,7 +770,7 @@ const KiteTurbineSimulation: React.FC = () => {
                   }
 
                   // Beacon Light on Kite (Foggy/Night/Christmas)
-                  if (scenario !== 'default') {
+                  if (scenario !== 'default' && scenario !== 'wind_field') {
                       const isStrobe = Math.floor(Date.now() / 500) % 2 === 0;
                       if (isStrobe || scenario === 'night' || scenario === 'christmas') {
                           // Center of kite
@@ -1031,6 +1148,7 @@ const KiteTurbineSimulation: React.FC = () => {
                 <option value="foggy">Foggy Weather</option>
                 <option value="night">Night Operation</option>
                 <option value="christmas">Christmas Special</option>
+                <option value="wind_field">Wind Field</option>
             </select>
         </div>
 
